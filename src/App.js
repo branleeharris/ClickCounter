@@ -149,6 +149,26 @@ function App() {
   };
   
   // --- EVENT HANDLERS ---
+  // Trigger file upload dialog
+  const triggerFileUpload = () => {
+    // Create a temporary file input
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = handleFileUpload;
+    
+    // Ensure the input exists in the DOM momentarily
+    document.body.appendChild(input);
+    input.click();
+    
+    // Schedule removal from DOM after click is processed
+    setTimeout(() => {
+      if (input && input.parentNode) {
+        document.body.removeChild(input);
+      }
+    }, 100);
+  };
+  
   // Handle file upload
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
@@ -410,153 +430,162 @@ function App() {
   };
   
   // Export the image with markers
-  const exportImage = () => {
-    if (!image || markers.length === 0) return;
+
+const exportImage = () => {
+  if (!image || markers.length === 0) return;
+  
+  setIsExporting(true);
+  
+  try {
+    // Create a new canvas for export
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
     
-    setIsExporting(true);
+    // Set dimensions to match the original image with space for legend
+    canvas.width = image.width;
+    canvas.height = image.height + 80;
     
-    try {
-      // Create a new canvas for export
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
+    // Fill with white background
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Load the image and draw everything once it's ready
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+    
+    img.onload = () => {
+      // Draw image
+      ctx.drawImage(img, 0, 0, image.width, image.height);
       
-      // Set dimensions to match the original image
-      canvas.width = image.width;
-      canvas.height = image.height + 80; // Add space for legend
+      // Calculate appropriate marker size based on image dimensions
+      const minDimension = Math.min(image.width, image.height);
+      const markerSize = Math.max(8, Math.min(20, minDimension / 50));
       
-      // Fill with white background
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      console.log('Drawing markers:', markers.length);
+      console.log('Image dimensions:', image.width, 'x', image.height);
       
-      // Draw the image
-      const img = new Image();
-      img.onload = () => {
-        // Draw image
-        ctx.drawImage(img, 0, 0);
+      // Draw all markers
+      markers.forEach(marker => {
+        const category = categories.find(c => c.id === marker.categoryId);
+        if (!category) return;
         
-        // Calculate marker size relative to image
-        const markerSize = Math.max(10, Math.min(15, Math.min(image.width, image.height) / 50));
-        
-        // Draw markers
-        markers.forEach(marker => {
-          const category = categories.find(c => c.id === marker.categoryId);
-          if (!category) return;
-          
-          // Draw marker circle
-          ctx.beginPath();
-          ctx.arc(marker.x, marker.y, markerSize, 0, Math.PI * 2);
-          ctx.fillStyle = category.color;
-          ctx.fill();
-          
-          // Draw border
-          ctx.strokeStyle = '#FFFFFF';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-          
-          // Get category markers and index
-          const categoryMarkers = markers
-            .filter(m => m.categoryId === marker.categoryId)
-            .sort((a, b) => a.id - b.id);
-          
-          const markerIndex = categoryMarkers.findIndex(m => m.id === marker.id);
-          
-          // Draw number
-          ctx.fillStyle = getContrastColor(category.color);
-          ctx.font = `bold ${markerSize * 0.8}px sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText((markerIndex + 1).toString(), marker.x, marker.y);
-        });
-        
-        // Draw legend
-        const legendY = image.height + 10;
-        
-        // Legend background
-        ctx.fillStyle = '#F8F9FA';
-        ctx.fillRect(0, image.height, canvas.width, 80);
-        
-        // Legend border
-        ctx.strokeStyle = '#E9ECEF';
-        ctx.lineWidth = 1;
+        // Draw marker circle
         ctx.beginPath();
-        ctx.moveTo(0, image.height);
-        ctx.lineTo(canvas.width, image.height);
+        ctx.arc(marker.x, marker.y, markerSize, 0, Math.PI * 2);
+        ctx.fillStyle = category.color;
+        ctx.fill();
+        
+        // Draw border
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
         ctx.stroke();
         
-        // Legend title
-        ctx.fillStyle = '#212529';
-        ctx.font = 'bold 16px sans-serif';
+        // Get category markers and index
+        const categoryMarkers = markers
+          .filter(m => m.categoryId === marker.categoryId)
+          .sort((a, b) => a.id - b.id);
+        
+        const markerIndex = categoryMarkers.findIndex(m => m.id === marker.id);
+        
+        // Draw number
+        ctx.fillStyle = getContrastColor(category.color);
+        ctx.font = `bold ${markerSize * 0.8}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText((markerIndex + 1).toString(), marker.x, marker.y);
+      });
+      
+      // Draw legend
+      const legendY = image.height + 10;
+      
+      // Legend background
+      ctx.fillStyle = '#F8F9FA';
+      ctx.fillRect(0, image.height, canvas.width, 80);
+      
+      // Legend border
+      ctx.strokeStyle = '#E9ECEF';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, image.height);
+      ctx.lineTo(canvas.width, image.height);
+      ctx.stroke();
+      
+      // Legend title
+      ctx.fillStyle = '#212529';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('Legend:', 15, legendY);
+      
+      // Category counts
+      let xPos = 100;
+      const categoryInfo = categories
+        .filter(category => markers.some(m => m.categoryId === category.id))
+        .map(category => ({
+          ...category,
+          count: markers.filter(m => m.categoryId === category.id).length
+        }));
+      
+      categoryInfo.forEach(({ name, color, count }) => {
+        // Check if we need to move to next row
+        if (xPos > canvas.width - 100) {
+          xPos = 100;
+          legendY += 25;
+        }
+        
+        // Draw color dot
+        ctx.beginPath();
+        ctx.arc(xPos, legendY + 8, 8, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        
+        // Draw count
+        ctx.fillStyle = '#495057';
+        ctx.font = '14px sans-serif';
         ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText('Legend:', 15, legendY);
+        ctx.fillText(`${name}: ${count}`, xPos + 15, legendY);
         
-        // Category counts
-        let xPos = 100;
-        const categoryInfo = categories
-          .filter(category => markers.some(m => m.categoryId === category.id))
-          .map(category => ({
-            ...category,
-            count: markers.filter(m => m.categoryId === category.id).length
-          }));
-        
-        categoryInfo.forEach(({ name, color, count }) => {
-          // Check if we need to move to next row
-          if (xPos > canvas.width - 100) {
-            xPos = 100;
-            legendY += 25;
-          }
-          
-          // Draw color dot
-          ctx.beginPath();
-          ctx.arc(xPos, legendY + 8, 8, 0, Math.PI * 2);
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.strokeStyle = '#FFFFFF';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-          
-          // Draw category name and count
-          ctx.fillStyle = '#495057';
-          ctx.font = '14px sans-serif';
-          ctx.textAlign = 'left';
-          ctx.fillText(`${name}: ${count}`, xPos + 15, legendY);
-          
-          xPos += Math.min(150, (canvas.width - 150) / categoryInfo.length);
-        });
-        
-        // Draw total count
-        ctx.fillStyle = '#212529';
-        ctx.font = 'bold 14px sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(`Total: ${markers.length}`, canvas.width - 15, legendY);
-        
-        // Create download link
-        const dataUrl = canvas.toDataURL('image/png');
-        const a = document.createElement('a');
-        a.href = dataUrl;
-        a.download = `marked_${image.name || 'map'}.png`;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        
-        setIsExporting(false);
-        notify('Image exported successfully', 'success');
-      };
+        xPos += Math.min(150, (canvas.width - 150) / categoryInfo.length);
+      });
       
-      img.onerror = () => {
-        setIsExporting(false);
-        notify('Failed to export image', 'error');
-      };
+      // Draw total count
+      ctx.fillStyle = '#212529';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(`Total: ${markers.length}`, canvas.width - 15, legendY);
       
-      img.src = image.src;
+      // Create download link
+      const dataUrl = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `marked_${image.name || 'map'}.png`;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
       
-    } catch (error) {
-      console.error('Export error:', error);
       setIsExporting(false);
-      notify('Failed to export image', 'error');
-    }
-  };
+      notify('Image exported successfully', 'success');
+    };
+    
+    img.onerror = (error) => {
+      console.error('Image loading error during export:', error);
+      setIsExporting(false);
+      notify('Failed to export image - could not load image data', 'error');
+    };
+    
+    // Set the image source
+    img.src = image.src;
+    
+  } catch (error) {
+    console.error('Export error:', error);
+    setIsExporting(false);
+    notify('Failed to export image: ' + (error.message || 'Unknown error'), 'error');
+  }
+};
   
   // --- KEYBOARD SHORTCUTS ---
   useEffect(() => {
@@ -916,18 +945,11 @@ function App() {
                 </button>
                 
                 <button
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={triggerFileUpload}
                   className="w-full py-2 px-4 bg-gray-200 text-gray-700 hover:bg-gray-300 rounded"
                 >
                   {image ? 'Change Image' : 'Upload Image'}
                 </button>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  accept="image/*"
-                  className="hidden"
-                />
               </div>
             </div>
           </div>
@@ -1046,7 +1068,7 @@ function App() {
               </div>
               
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={triggerFileUpload}
                 className="px-6 py-3 bg-blue-500 text-white rounded-lg shadow-sm hover:bg-blue-600 transition-colors"
               >
                 Select Image
