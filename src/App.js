@@ -27,6 +27,7 @@ function App() {
   const [isAltPressed, setIsAltPressed] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [markerToDelete, setMarkerToDelete] = useState(null);
+  const [isOverCanvas, setIsOverCanvas] = useState(false);
   
   // Viewport states
   const [viewportTransform, setViewportTransform] = useState({
@@ -44,6 +45,7 @@ function App() {
   const canvasRef = useRef(null);
   const editInputRef = useRef(null);
   const mapAreaRef = useRef(null);
+  const markerRefs = useRef({});
   
   // --- UTILITY FUNCTIONS ---
   // Show a notification
@@ -191,19 +193,34 @@ function App() {
   
   // Check if mouse is over a marker (for delete mode)
   const checkMarkerHover = (mouseX, mouseY) => {
-    if (!isAltPressed || !image) return null;
+    if (!isAltPressed || !image || !isOverCanvas) return null;
     
-    // Use a larger hit area for delete mode
-    const deleteHitRadius = 20; // pixels on screen (not image coordinates)
+    // Use direct element bounding rect for hit testing
+    for (const markerId in markerRefs.current) {
+      const markerEl = markerRefs.current[markerId];
+      if (!markerEl) continue;
+      
+      const rect = markerEl.getBoundingClientRect();
+      
+      // Add an expanded hit area for better usability
+      const expandedRect = {
+        left: rect.left - 10,
+        right: rect.right + 10,
+        top: rect.top - 10,
+        bottom: rect.bottom + 10
+      };
+      
+      if (
+        mouseX >= expandedRect.left && 
+        mouseX <= expandedRect.right && 
+        mouseY >= expandedRect.top && 
+        mouseY <= expandedRect.bottom
+      ) {
+        return markers.find(m => m.id.toString() === markerId);
+      }
+    }
     
-    // Find markers close to mouse position
-    return markers.find(marker => {
-      const screenPos = imageToScreenCoords(marker.x, marker.y);
-      const dx = screenPos.x - mouseX;
-      const dy = screenPos.y - mouseY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      return distance < deleteHitRadius;
-    }) || null;
+    return null;
   };
   
   // --- EVENT HANDLERS ---
@@ -221,12 +238,22 @@ function App() {
     setMousePosition({ x: e.clientX, y: e.clientY });
     
     // Check for marker hover in delete mode
-    if (isAltPressed) {
+    if (isAltPressed && isOverCanvas) {
       const hoveredMarker = checkMarkerHover(e.clientX, e.clientY);
       setMarkerToDelete(hoveredMarker);
     } else {
       setMarkerToDelete(null);
     }
+  };
+  
+  // Handle mouse enter/leave for canvas
+  const handleCanvasMouseEnter = () => {
+    setIsOverCanvas(true);
+  };
+  
+  const handleCanvasMouseLeave = () => {
+    setIsOverCanvas(false);
+    setMarkerToDelete(null);
   };
   
   // Trigger file upload dialog
@@ -340,7 +367,7 @@ function App() {
   
   // Handle canvas click to add/remove markers
   const handleCanvasClick = (e) => {
-    if (!image || isPanning) return;
+    if (!image || isPanning || !isOverCanvas) return;
     
     // Check if we're in delete mode
     if (isAltPressed) {
@@ -1111,7 +1138,7 @@ function App() {
           {image ? (
             <div 
               ref={mapAreaRef}
-              className="relative"
+              className="relative cursor-default"
               onMouseDown={handleMouseDown}
               onClick={(e) => {
                 if (e.button === 0) {
@@ -1119,8 +1146,9 @@ function App() {
                 }
               }}
               onWheel={handleWheel}
+              onMouseEnter={handleCanvasMouseEnter}
+              onMouseLeave={handleCanvasMouseLeave}
               style={{
-                cursor: 'none', // Hide the default cursor
                 width: '100%',
                 height: '100%',
                 overflow: 'hidden'
@@ -1167,6 +1195,7 @@ function App() {
                 return (
                   <div
                     key={marker.id}
+                    ref={el => markerRefs.current[marker.id] = el}
                     className="absolute transform -translate-x-1/2 -translate-y-1/2 pointer-events-none"
                     style={{
                       top: screenPos.y + 'px',
@@ -1209,56 +1238,58 @@ function App() {
                 );
               })}
               
-              {/* Custom cursor */}
-              <div
-                className="fixed pointer-events-none z-50 custom-cursor"
-                style={{
-                  top: mousePosition.y,
-                  left: mousePosition.x,
-                  transform: 'translate(-50%, -50%)'
-                }}
-              >
-                {isAltPressed ? (
-                  /* Delete mode cursor */
-                  <div className="flex flex-col items-center delete-cursor">
+              {/* Custom cursor - only shown when over the canvas */}
+              {isOverCanvas && (
+                <div
+                  className="fixed pointer-events-none z-50 custom-cursor"
+                  style={{
+                    top: mousePosition.y,
+                    left: mousePosition.x,
+                    transform: 'translate(-50%, -50%)'
+                  }}
+                >
+                  {isAltPressed ? (
+                    /* Delete mode cursor */
+                    <div className="flex flex-col items-center delete-cursor">
+                      <div
+                        className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
+                        style={{ backgroundColor: 'rgba(239, 68, 68, 0.7)' }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                      <div className="text-white bg-red-600 text-xs px-1 rounded mt-1 opacity-80">
+                        Delete Mode
+                      </div>
+                    </div>
+                  ) : isPanning ? (
+                    /* Panning mode cursor */
+                    <div className="flex flex-col items-center">
+                      <div
+                        className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
+                        style={{ backgroundColor: 'rgba(59, 130, 246, 0.7)' }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M10 2a2 2 0 012 2v2h2a2 2 0 012 2v2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2v-2h2V8h-4V6h2V4h-4v4h2v2H8v4H6v-2H4v2H2v-2a2 2 0 012-2h2V6a2 2 0 012-2h2V2z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                      <div className="text-white bg-blue-600 text-xs px-1 rounded mt-1 opacity-80">
+                        Panning
+                      </div>
+                    </div>
+                  ) : (
+                    /* Regular cursor (category dot) */
                     <div
-                      className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
-                      style={{ backgroundColor: 'rgba(239, 68, 68, 0.7)' }}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                    </div>
-                    <div className="text-white bg-red-600 text-xs px-1 rounded mt-1 opacity-80">
-                      Delete Mode
-                    </div>
-                  </div>
-                ) : isPanning ? (
-                  /* Panning mode cursor */
-                  <div className="flex flex-col items-center">
-                    <div
-                      className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
-                      style={{ backgroundColor: 'rgba(59, 130, 246, 0.7)' }}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M10 2a2 2 0 012 2v2h2a2 2 0 012 2v2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2v-2h2V8h-4V6h2V4h-4v4h2v2H8v4H6v-2H4v2H2v-2a2 2 0 012-2h2V6a2 2 0 012-2h2V2z" clipRule="evenodd" />
-                      </svg>
-                    </div>
-                    <div className="text-white bg-blue-600 text-xs px-1 rounded mt-1 opacity-80">
-                      Panning
-                    </div>
-                  </div>
-                ) : (
-                  /* Regular cursor (category dot) */
-                  <div
-                    className="rounded-full w-6 h-6 border-2 border-white"
-                    style={{ 
-                      backgroundColor: getColorWithAlpha(getActiveCategoryColor(), 0.7),
-                      boxShadow: '0 0 5px rgba(0,0,0,0.3)'
-                    }}
-                  ></div>
-                )}
-              </div>
+                      className="rounded-full w-6 h-6 border-2 border-white"
+                      style={{ 
+                        backgroundColor: getColorWithAlpha(getActiveCategoryColor(), 0.7),
+                        boxShadow: '0 0 5px rgba(0,0,0,0.3)'
+                      }}
+                    ></div>
+                  )}
+                </div>
+              )}
               
               {/* Instructions overlay */}
               {markers.length === 0 && image && (
@@ -1273,11 +1304,11 @@ function App() {
               )}
               
               {/* Mode indicator */}
-              {image && (isAltPressed || isPanning) && (
+              {image && isOverCanvas && (isAltPressed || isPanning) && (
                 <div className="fixed top-4 right-4 z-40 pointer-events-none mode-indicator">
                   {isAltPressed && (
                     <div className="bg-red-600 text-white px-3 py-1 rounded shadow-lg animate-pulse">
-                      Delete Mode
+                      Delete Mode {markerToDelete ? '(Target Found)' : ''}
                     </div>
                   )}
                   {isPanning && (
@@ -1352,7 +1383,7 @@ function App() {
               <section>
                 <h4 className="font-medium text-gray-300 mb-2">Visual Indicators</h4>
                 <ul className="space-y-1 text-gray-400">
-                  <li><span className="font-medium text-gray-300">Cursor dot:</span> Shows the currently selected category color</li>
+                  <li><span className="font-medium text-gray-300">Cursor dot:</span> Shows the currently selected category color (only in canvas area)</li>
                   <li><span className="font-medium text-gray-300">Delete mode:</span> Red cursor with X icon when Alt is held</li>
                   <li><span className="font-medium text-gray-300">Deletion target:</span> Markers targeted for deletion will highlight with a red pulsing border</li>
                   <li><span className="font-medium text-gray-300">Panning mode:</span> Blue cursor with move icon when panning</li>
