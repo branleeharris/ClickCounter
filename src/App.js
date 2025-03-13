@@ -1,6 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './index.css';
 import { toPng } from 'html-to-image';
+import { useCollaboration } from './contexts/CollaborationContext';
+import useCollaborationSync from './hooks/useCollaborationSync';
+import InviteButton from './components/InviteButton';
+import CollaborationStatus from './components/CollaborationStatus';
+
 
 function App() {
   // --- STATE MANAGEMENT ---
@@ -37,6 +42,25 @@ function App() {
   });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  
+  // --- COLLABORATION ---
+  // Get collaboration context and sync hook
+  const { 
+    isCollaborating, 
+    sessionInfo, 
+    receivedImage 
+  } = useCollaboration();
+  
+  const { 
+    syncAddMarker, 
+    syncRemoveMarker, 
+    syncUpdateCategory 
+  } = useCollaborationSync({
+    markers,
+    setMarkers,
+    categories,
+    setCategories
+  });
   
   // --- REFS ---
   const fileInputRef = useRef(null);
@@ -291,13 +315,18 @@ function App() {
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
-        setImage({
+        const imageData = {
           src: event.target.result,
           width: img.width,
           height: img.height,
           name: file.name,
           type: file.type
-        });
+        };
+        
+        setImage(imageData);
+        
+        // Make image available for collaboration
+        window.currentImage = imageData;
         
         // Reset view
         setViewportTransform({ scale: 1, x: 0, y: 0 });
@@ -333,13 +362,18 @@ function App() {
         reader.onload = (event) => {
           const img = new Image();
           img.onload = () => {
-            setImage({
+            const imageData = {
               src: event.target.result,
               width: img.width,
               height: img.height,
               name: 'pasted-image.png',
               type: item.type
-            });
+            };
+            
+            setImage(imageData);
+            
+            // Make image available for collaboration
+            window.currentImage = imageData;
             
             // Reset view
             setViewportTransform({ scale: 1, x: 0, y: 0 });
@@ -373,7 +407,12 @@ function App() {
     if (isAltPressed) {
       // Use markerToDelete which is identified during mousemove
       if (markerToDelete) {
+        // Remove marker from local state
         setMarkers(markers.filter(m => m.id !== markerToDelete.id));
+        
+        // Sync with collaboration session
+        syncRemoveMarker(markerToDelete.id);
+        
         notify('Marker removed', 'info');
         setMarkerToDelete(null);
         return;
@@ -391,15 +430,19 @@ function App() {
     
     // Only add if we have an active category
     if (category) {
-      setMarkers([
-        ...markers,
-        {
-          id: Date.now(),
-          x: coords.x,
-          y: coords.y,
-          categoryId: activeCategory
-        }
-      ]);
+      // Create new marker with unique ID
+      const newMarker = {
+        id: Date.now(),
+        x: coords.x,
+        y: coords.y,
+        categoryId: activeCategory
+      };
+      
+      // Add to local state
+      setMarkers([...markers, newMarker]);
+      
+      // Sync with collaboration session
+      syncAddMarker(newMarker);
     }
   };
   
@@ -463,11 +506,24 @@ function App() {
     if (!editingCategoryId) return;
     
     if (newCategoryName.trim()) {
-      setCategories(categories.map(category => 
-        category.id === editingCategoryId 
-          ? { ...category, name: newCategoryName.trim() } 
-          : category
-      ));
+      // Find the category to update
+      const category = categories.find(c => c.id === editingCategoryId);
+      
+      if (category) {
+        // Create the updated category
+        const updatedCategory = { 
+          ...category, 
+          name: newCategoryName.trim() 
+        };
+        
+        // Update local state
+        setCategories(categories.map(c => 
+          c.id === editingCategoryId ? updatedCategory : c
+        ));
+        
+        // Sync with collaboration session
+        syncUpdateCategory(updatedCategory);
+      }
     }
     
     setEditingCategoryId(null);
@@ -482,8 +538,13 @@ function App() {
       color: getDefaultCategoryColor(newId - 1)
     };
     
+    // Update local state
     setCategories([...categories, newCategory]);
     setActiveCategory(newId);
+    
+    // Sync with collaboration session
+    syncUpdateCategory(newCategory);
+    
     notify(`Added ${newCategory.name}`, 'success');
   };
   
@@ -505,11 +566,24 @@ function App() {
       if (!confirmDelete) return;
     }
     
+    // Get markers to remove
+    const markersToRemove = markers.filter(m => m.categoryId === categoryId);
+    
     // Remove the category
     setCategories(categories.filter(c => c.id !== categoryId));
     
     // Remove associated markers
     setMarkers(markers.filter(m => m.categoryId !== categoryId));
+    
+    // Sync category removal with collaboration session
+    // (This depends on your backend handling - you might need a special "delete category" function)
+    
+    // Sync marker removals with collaboration session
+    if (isCollaborating) {
+      markersToRemove.forEach(marker => {
+        syncRemoveMarker(marker.id);
+      });
+    }
     
     // Update active category if needed
     if (activeCategory === categoryId) {
@@ -523,8 +597,46 @@ function App() {
     
     const confirmClear = window.confirm('Are you sure you want to clear all markers?');
     if (confirmClear) {
+      // Store markers to remove for collaboration sync
+      const markersToRemove = [...markers];
+      
+      // Clear local markers
       setMarkers([]);
+      
+      // Sync with collaboration session
+      if (isCollaborating) {
+        markersToRemove.forEach(marker => {
+          syncRemoveMarker(marker.id);
+        });
+      }
     }
+  };
+  
+  // Update category color
+  const updateCategoryColor = (categoryId, newColor) => {
+    // Find the category to update
+    const category = categories.find(c => c.id === categoryId);
+    
+    if (category) {
+      // Create the updated category
+      const updatedCategory = { 
+        ...category, 
+        color: newColor 
+      };
+      
+      // Update local state
+      setCategories(
+        categories.map(c => 
+          c.id === categoryId ? updatedCategory : c
+        )
+      );
+      
+      // Sync with collaboration session
+      syncUpdateCategory(updatedCategory);
+    }
+    
+    setShowColorPicker(false);
+    setEditingCategoryId(null);
   };
   
   // Export the image with markers
@@ -809,6 +921,39 @@ function App() {
     };
   }, []);
   
+  // Handle received image when joining a session
+  useEffect(() => {
+    // Make image and categories available globally for collaboration
+    if (image) {
+      window.currentImage = image;
+    }
+    if (categories) {
+      window.currentCategories = categories;
+    }
+    
+    // If we joined a session and received an image
+    if (receivedImage && !image) {
+      // Create a new Image object from the received data
+      const img = new Image();
+      img.onload = () => {
+        setImage({
+          src: receivedImage.src,
+          width: receivedImage.width,
+          height: receivedImage.height,
+          name: receivedImage.name,
+          type: receivedImage.type
+        });
+        
+        // Reset view
+        setViewportTransform({ scale: 1, x: 0, y: 0 });
+        
+        notify('Connected to collaboration session', 'success');
+      };
+      
+      img.src = receivedImage.src;
+    }
+  }, [image, categories, receivedImage]);
+  
   // --- RENDERING ---
   // Count markers by category
   const getCategoryCount = (categoryId) => {
@@ -831,19 +976,6 @@ function App() {
     }
   };
   
-  // Update category color
-  const updateCategoryColor = (categoryId, newColor) => {
-    setCategories(
-      categories.map(category => 
-        category.id === categoryId
-          ? { ...category, color: newColor }
-          : category
-      )
-    );
-    setShowColorPicker(false);
-    setEditingCategoryId(null);
-  };
-  
   return (
     <div className="h-screen w-screen flex flex-col bg-gray-900">
       {/* Header */}
@@ -861,6 +993,11 @@ function App() {
           <div className="flex items-center space-x-3">
             {image && (
               <>
+                {/* Collaboration controls */}
+                <InviteButton />
+                <CollaborationStatus />
+                
+                {/* Zoom controls */}
                 <div className="flex items-center space-x-1 text-sm px-2 py-1 bg-gray-700 rounded">
                   <button
                     onClick={() => setViewportTransform({...viewportTransform, scale: viewportTransform.scale * 1.2})}
@@ -1192,6 +1329,13 @@ function App() {
                 // Check if this marker is being hovered for deletion
                 const isTargetedForDeletion = markerToDelete && markerToDelete.id === marker.id;
                 
+                // Check if this marker is from the current user (for highlighting in collaboration)
+                const isCurrentUserMarker = isCollaborating && marker.createdBy === sessionInfo?.userId;
+                
+                // Get creator info if available
+                const creatorInfo = isCollaborating && marker.createdBy ? 
+                  sessionInfo?.collaborators?.[marker.createdBy] : null;
+                
                 return (
                   <div
                     key={marker.id}
@@ -1202,6 +1346,7 @@ function App() {
                       left: screenPos.x + 'px',
                       zIndex: isTargetedForDeletion ? 10 : 1, // Bring to front when targeted
                     }}
+                    title={creatorInfo ? `Added by ${creatorInfo.name}` : undefined}
                   >
                     {/* Highlight effect for marker targeted for deletion */}
                     {isTargetedForDeletion && (
@@ -1220,12 +1365,15 @@ function App() {
                     
                     {/* Marker circle */}
                     <div
-                      className={`rounded-full flex items-center justify-center ${isTargetedForDeletion ? 'ring-2 ring-red-500' : ''}`}
+                      className={`rounded-full flex items-center justify-center ${
+                        isTargetedForDeletion ? 'ring-2 ring-red-500' : 
+                        isCollaborating && !isCurrentUserMarker ? 'ring-2 ring-white' : ''
+                      }`}
                       style={{
                         width: markerSize * 2 + 'px',
                         height: markerSize * 2 + 'px',
                         backgroundColor: category.color,
-                        border: '2px solid white',
+                        border: `2px solid ${isCollaborating && creatorInfo ? creatorInfo.color : 'white'}`,
                         boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
                         fontSize: markerSize * 0.8 + 'px',
                         color: getContrastColor(category.color),
@@ -1377,6 +1525,16 @@ function App() {
                   <li><span className="font-medium text-gray-300">Zoom in/out:</span> Use mouse wheel or the zoom controls</li>
                   <li><span className="font-medium text-gray-300">Pan image:</span> Use middle mouse button</li>
                   <li><span className="font-medium text-gray-300">Reset view:</span> Click 100% button or press R</li>
+                </ul>
+              </section>
+              
+              <section>
+                <h4 className="font-medium text-gray-300 mb-2">Collaboration</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Start collaboration:</span> Click "Start Collaboration" button</li>
+                  <li><span className="font-medium text-gray-300">Invite others:</span> Click "Invite Collaborators" and share the link</li>
+                  <li><span className="font-medium text-gray-300">Chat with collaborators:</span> Use the chat panel in the collaboration sidebar</li>
+                  <li><span className="font-medium text-gray-300">View collaborators:</span> Click the collaborator count to see who's connected</li>
                 </ul>
               </section>
               
