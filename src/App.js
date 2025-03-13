@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './index.css';
+import { toPng } from 'html-to-image';
 
 function App() {
   // --- STATE MANAGEMENT ---
@@ -7,9 +8,7 @@ function App() {
   const [image, setImage] = useState(null);
   const [markers, setMarkers] = useState([]);
   const [categories, setCategories] = useState([
-    { id: 1, name: 'Location', color: '#FF5252' },
-    { id: 2, name: 'Point of Interest', color: '#2196F3' },
-    { id: 3, name: 'Landmark', color: '#4CAF50' },
+    { id: 1, name: 'Category 1', color: '#FF5252' },
   ]);
   const [activeCategory, setActiveCategory] = useState(1);
   
@@ -22,6 +21,12 @@ function App() {
   const [notification, setNotification] = useState(null);
   const [showSidebar, setShowSidebar] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  
+  // Mode and cursor states
+  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+  const [isAltPressed, setIsAltPressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [markerToDelete, setMarkerToDelete] = useState(null);
   
   // Viewport states
   const [viewportTransform, setViewportTransform] = useState({
@@ -36,7 +41,9 @@ function App() {
   const fileInputRef = useRef(null);
   const imageRef = useRef(null);
   const containerRef = useRef(null);
+  const canvasRef = useRef(null);
   const editInputRef = useRef(null);
+  const mapAreaRef = useRef(null);
   
   // --- UTILITY FUNCTIONS ---
   // Show a notification
@@ -59,6 +66,40 @@ function App() {
     } catch (e) {
       return '#ffffff';
     }
+  };
+  
+  // Add alpha channel to a hex color
+  const getColorWithAlpha = (hexColor, alpha = 0.5) => {
+    if (!hexColor || hexColor.length < 7) return 'rgba(255, 255, 255, 0.5)';
+    
+    try {
+      const r = parseInt(hexColor.slice(1, 3), 16);
+      const g = parseInt(hexColor.slice(3, 5), 16);
+      const b = parseInt(hexColor.slice(5, 7), 16);
+      
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    } catch (e) {
+      return 'rgba(255, 255, 255, 0.5)';
+    }
+  };
+  
+  // Get a default color based on category index
+  const getDefaultCategoryColor = (index) => {
+    const defaultColors = [
+      '#FF5252', // Red
+      '#2196F3', // Blue
+      '#4CAF50', // Green
+      '#FF9800', // Orange
+      '#9C27B0', // Purple
+      '#00BCD4', // Cyan
+      '#FFEB3B', // Yellow
+      '#795548', // Brown
+      '#607D8B', // Blue Grey
+      '#E91E63'  // Pink
+    ];
+    
+    // Use modulo to cycle through colors if we have more than 10 categories
+    return defaultColors[index % defaultColors.length];
   };
   
   // Generate a random color
@@ -148,7 +189,46 @@ function App() {
     };
   };
   
+  // Check if mouse is over a marker (for delete mode)
+  const checkMarkerHover = (mouseX, mouseY) => {
+    if (!isAltPressed || !image) return null;
+    
+    // Use a larger hit area for delete mode
+    const deleteHitRadius = 20; // pixels on screen (not image coordinates)
+    
+    // Find markers close to mouse position
+    return markers.find(marker => {
+      const screenPos = imageToScreenCoords(marker.x, marker.y);
+      const dx = screenPos.x - mouseX;
+      const dy = screenPos.y - mouseY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      return distance < deleteHitRadius;
+    }) || null;
+  };
+  
   // --- EVENT HANDLERS ---
+  // Handle mouse move to update cursor position
+  const handleMouseMove = (e) => {
+    if (isDragging) {
+      setViewportTransform({
+        ...viewportTransform,
+        x: e.clientX - dragStart.x,
+        y: e.clientY - dragStart.y
+      });
+    }
+    
+    // Update mouse position
+    setMousePosition({ x: e.clientX, y: e.clientY });
+    
+    // Check for marker hover in delete mode
+    if (isAltPressed) {
+      const hoveredMarker = checkMarkerHover(e.clientX, e.clientY);
+      setMarkerToDelete(hoveredMarker);
+    } else {
+      setMarkerToDelete(null);
+    }
+  };
+  
   // Trigger file upload dialog
   const triggerFileUpload = () => {
     // Create a temporary file input
@@ -260,49 +340,49 @@ function App() {
   
   // Handle canvas click to add/remove markers
   const handleCanvasClick = (e) => {
-    if (!image) return;
+    if (!image || isPanning) return;
     
+    // Check if we're in delete mode
+    if (isAltPressed) {
+      // Use markerToDelete which is identified during mousemove
+      if (markerToDelete) {
+        setMarkers(markers.filter(m => m.id !== markerToDelete.id));
+        notify('Marker removed', 'info');
+        setMarkerToDelete(null);
+        return;
+      }
+      // If no marker is hovered, do nothing
+      return;
+    }
+    
+    // Add marker mode
     // Get image coordinates from screen coordinates
     const coords = screenToImageCoords(e.clientX, e.clientY);
     
-    // Check if clicking on an existing marker (for deletion)
-    const clickedMarkerIndex = markers.findIndex(marker => {
-      const dx = marker.x - coords.x;
-      const dy = marker.y - coords.y;
-      // Use a reasonable radius for hit detection (in image coordinates)
-      return Math.sqrt(dx * dx + dy * dy) < 15;
-    });
+    // Add a new marker
+    const category = categories.find(c => c.id === activeCategory);
     
-    if (clickedMarkerIndex !== -1) {
-      // Remove the marker
-      const updatedMarkers = [...markers];
-      updatedMarkers.splice(clickedMarkerIndex, 1);
-      setMarkers(updatedMarkers);
-    } else {
-      // Add a new marker
-      const category = categories.find(c => c.id === activeCategory);
-      
-      // Only add if we have an active category
-      if (category) {
-        setMarkers([
-          ...markers,
-          {
-            id: Date.now(),
-            x: coords.x,
-            y: coords.y,
-            categoryId: activeCategory
-          }
-        ]);
-      }
+    // Only add if we have an active category
+    if (category) {
+      setMarkers([
+        ...markers,
+        {
+          id: Date.now(),
+          x: coords.x,
+          y: coords.y,
+          categoryId: activeCategory
+        }
+      ]);
     }
   };
   
-  // Handle dragging for pan
+  // Handle mouse down for dragging/panning
   const handleMouseDown = (e) => {
-    // Only enable panning with middle mouse button or Alt+Left button
-    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+    // Only enable panning with middle mouse button (button 1)
+    if (e.button === 1) {
       e.preventDefault();
       setIsDragging(true);
+      setIsPanning(true);
       setDragStart({
         x: e.clientX - viewportTransform.x,
         y: e.clientY - viewportTransform.y
@@ -310,18 +390,10 @@ function App() {
     }
   };
   
-  const handleMouseMove = (e) => {
-    if (isDragging) {
-      setViewportTransform({
-        ...viewportTransform,
-        x: e.clientX - dragStart.x,
-        y: e.clientY - dragStart.y
-      });
-    }
-  };
-  
+  // Handle mouse up to end dragging
   const handleMouseUp = () => {
     setIsDragging(false);
+    setIsPanning(false);
   };
   
   // Handle mouse wheel for zoom
@@ -374,19 +446,18 @@ function App() {
     setEditingCategoryId(null);
   };
   
-  // Add a new category
+  // Add a new category (immediately, with default color)
   const addNewCategory = () => {
     const newId = Math.max(0, ...categories.map(c => c.id)) + 1;
     const newCategory = {
       id: newId,
       name: `Category ${newId}`,
-      color: newCategoryColor
+      color: getDefaultCategoryColor(newId - 1)
     };
     
     setCategories([...categories, newCategory]);
     setActiveCategory(newId);
-    setShowColorPicker(false);
-    setNewCategoryColor(getRandomColor());
+    notify(`Added ${newCategory.name}`, 'success');
   };
   
   // Delete a category
@@ -430,167 +501,172 @@ function App() {
   };
   
   // Export the image with markers
-
-const exportImage = () => {
-  if (!image || markers.length === 0) return;
-  
-  setIsExporting(true);
-  
-  try {
-    // Create a new canvas for export
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+  const exportImage = () => {
+    if (!image || markers.length === 0 || !mapAreaRef.current) return;
     
-    // Set dimensions to match the original image with space for legend
-    canvas.width = image.width;
-    canvas.height = image.height + 80;
+    setIsExporting(true);
+    notify('Preparing export...', 'info');
     
-    // Fill with white background
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Load the image and draw everything once it's ready
-    const img = new Image();
-    img.crossOrigin = 'Anonymous';
-    
-    img.onload = () => {
-      // Draw image
-      ctx.drawImage(img, 0, 0, image.width, image.height);
+    try {
+      // First, hide any UI elements we don't want in the export
+      const deleteModeCursor = document.querySelector('.delete-cursor');
+      const modeIndicator = document.querySelector('.mode-indicator');
+      if (deleteModeCursor) deleteModeCursor.style.display = 'none';
+      if (modeIndicator) modeIndicator.style.display = 'none';
       
-      // Calculate appropriate marker size based on image dimensions
-      const minDimension = Math.min(image.width, image.height);
-      const markerSize = Math.max(8, Math.min(20, minDimension / 50));
-      
-      console.log('Drawing markers:', markers.length);
-      console.log('Image dimensions:', image.width, 'x', image.height);
-      
-      // Draw all markers
-      markers.forEach(marker => {
-        const category = categories.find(c => c.id === marker.categoryId);
-        if (!category) return;
-        
-        // Draw marker circle
-        ctx.beginPath();
-        ctx.arc(marker.x, marker.y, markerSize, 0, Math.PI * 2);
-        ctx.fillStyle = category.color;
-        ctx.fill();
-        
-        // Draw border
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        
-        // Get category markers and index
-        const categoryMarkers = markers
-          .filter(m => m.categoryId === marker.categoryId)
-          .sort((a, b) => a.id - b.id);
-        
-        const markerIndex = categoryMarkers.findIndex(m => m.id === marker.id);
-        
-        // Draw number
-        ctx.fillStyle = getContrastColor(category.color);
-        ctx.font = `bold ${markerSize * 0.8}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText((markerIndex + 1).toString(), marker.x, marker.y);
-      });
-      
-      // Draw legend
-      const legendY = image.height + 10;
-      
-      // Legend background
-      ctx.fillStyle = '#F8F9FA';
-      ctx.fillRect(0, image.height, canvas.width, 80);
-      
-      // Legend border
-      ctx.strokeStyle = '#E9ECEF';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, image.height);
-      ctx.lineTo(canvas.width, image.height);
-      ctx.stroke();
-      
-      // Legend title
-      ctx.fillStyle = '#212529';
-      ctx.font = 'bold 16px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText('Legend:', 15, legendY);
-      
-      // Category counts
-      let xPos = 100;
-      const categoryInfo = categories
-        .filter(category => markers.some(m => m.categoryId === category.id))
-        .map(category => ({
-          ...category,
-          count: markers.filter(m => m.categoryId === category.id).length
-        }));
-      
-      categoryInfo.forEach(({ name, color, count }) => {
-        // Check if we need to move to next row
-        if (xPos > canvas.width - 100) {
-          xPos = 100;
-          legendY += 25;
+      // Capture the exact current view using html-to-image
+      toPng(mapAreaRef.current, { 
+        cacheBust: true,
+        skipAutoScale: true,
+        quality: 1.0,
+        pixelRatio: 1.5, // Higher quality
+        filter: (node) => {
+          // Filter out UI elements that shouldn't be in the export
+          return (
+            !node.classList?.contains('custom-cursor') && 
+            !node.classList?.contains('mode-indicator') &&
+            !node.classList?.contains('instructions-overlay')
+          );
         }
+      })
+      .then(dataUrl => {
+        // Restore any hidden UI elements
+        if (deleteModeCursor) deleteModeCursor.style.display = '';
+        if (modeIndicator) modeIndicator.style.display = '';
         
-        // Draw color dot
-        ctx.beginPath();
-        ctx.arc(xPos, legendY + 8, 8, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        // Create a new Image with the captured data
+        const capturedImage = new Image();
+        capturedImage.onload = () => {
+          // Create canvas for the final export (image + legend)
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          
+          // Estimate dimensions - we need the captured image size plus space for legend
+          const capturedWidth = capturedImage.width;
+          const capturedHeight = capturedImage.height;
+          
+          // Legend height (fixed)
+          const legendHeight = 80;
+          
+          // Set canvas size
+          canvas.width = capturedWidth;
+          canvas.height = capturedHeight + legendHeight;
+          
+          // Fill with dark background
+          ctx.fillStyle = '#1F2937';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          // Draw the captured image at the top
+          ctx.drawImage(capturedImage, 0, 0);
+          
+          // Draw legend
+          const legendY = capturedHeight + 10;
+          
+          // Legend background
+          ctx.fillStyle = '#111827';
+          ctx.fillRect(0, capturedHeight, canvas.width, legendHeight);
+          
+          // Legend border
+          ctx.strokeStyle = '#374151';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, capturedHeight);
+          ctx.lineTo(canvas.width, capturedHeight);
+          ctx.stroke();
+          
+          // Legend title
+          ctx.fillStyle = '#F9FAFB';
+          ctx.font = 'bold 16px sans-serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText('Legend:', 15, legendY);
+          
+          // Category counts
+          let xPos = 100;
+          const categoryInfo = categories
+            .filter(category => markers.some(m => m.categoryId === category.id))
+            .map(category => ({
+              ...category,
+              count: markers.filter(m => m.categoryId === category.id).length
+            }));
+          
+          categoryInfo.forEach(({ name, color, count }) => {
+            // Check if we need to move to next row
+            if (xPos > canvas.width - 100) {
+              xPos = 100;
+              legendY += 25;
+            }
+            
+            // Draw color dot
+            ctx.beginPath();
+            ctx.arc(xPos, legendY + 8, 8, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            
+            // Draw count
+            ctx.fillStyle = '#D1D5DB';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`${name}: ${count}`, xPos + 15, legendY);
+            
+            xPos += Math.min(150, (canvas.width - 150) / categoryInfo.length);
+          });
+          
+          // Draw total count
+          ctx.fillStyle = '#F9FAFB';
+          ctx.font = 'bold 14px sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText(`Total: ${markers.length}`, canvas.width - 15, legendY);
+          
+          // Create download link
+          const finalImageData = canvas.toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = finalImageData;
+          a.download = `marked_${image.name || 'map'}.png`;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          
+          setIsExporting(false);
+          notify('Image exported successfully', 'success');
+        };
         
-        // Draw count
-        ctx.fillStyle = '#495057';
-        ctx.font = '14px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText(`${name}: ${count}`, xPos + 15, legendY);
+        capturedImage.onerror = (error) => {
+          console.error('Image processing error during export:', error);
+          setIsExporting(false);
+          notify('Failed to process image during export', 'error');
+        };
         
-        xPos += Math.min(150, (canvas.width - 150) / categoryInfo.length);
+        capturedImage.src = dataUrl;
+      })
+      .catch(error => {
+        console.error('Export error:', error);
+        setIsExporting(false);
+        notify('Failed to capture image: ' + (error.message || 'Unknown error'), 'error');
       });
-      
-      // Draw total count
-      ctx.fillStyle = '#212529';
-      ctx.font = 'bold 14px sans-serif';
-      ctx.textAlign = 'right';
-      ctx.fillText(`Total: ${markers.length}`, canvas.width - 15, legendY);
-      
-      // Create download link
-      const dataUrl = canvas.toDataURL('image/png');
-      const a = document.createElement('a');
-      a.href = dataUrl;
-      a.download = `marked_${image.name || 'map'}.png`;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
+    } catch (error) {
+      console.error('Export error:', error);
       setIsExporting(false);
-      notify('Image exported successfully', 'success');
-    };
-    
-    img.onerror = (error) => {
-      console.error('Image loading error during export:', error);
-      setIsExporting(false);
-      notify('Failed to export image - could not load image data', 'error');
-    };
-    
-    // Set the image source
-    img.src = image.src;
-    
-  } catch (error) {
-    console.error('Export error:', error);
-    setIsExporting(false);
-    notify('Failed to export image: ' + (error.message || 'Unknown error'), 'error');
-  }
-};
+      notify('Failed to export image: ' + (error.message || 'Unknown error'), 'error');
+    }
+  };
   
-  // --- KEYBOARD SHORTCUTS ---
+  // --- KEYBOARD SHORTCUTS & EVENT LISTENERS ---
+  // Track Alt key state for deletion mode
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Ignore shortcuts when typing in an input
+      // Detect Alt key press
+      if (e.key === 'Alt') {
+        setIsAltPressed(true);
+        // Prevent browser's default Alt behavior
+        e.preventDefault();
+      }
+      
+      // Ignore other shortcuts when typing in an input
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
         return;
       }
@@ -637,11 +713,21 @@ const exportImage = () => {
       }
     };
     
+    const handleKeyUp = (e) => {
+      // Detect Alt key release
+      if (e.key === 'Alt') {
+        setIsAltPressed(false);
+        setMarkerToDelete(null);
+      }
+    };
+    
     window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('paste', handlePaste);
     
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('paste', handlePaste);
     };
   }, [showHelp, categories, image, showSidebar, handlePaste]);
@@ -653,28 +739,48 @@ const exportImage = () => {
     }
   }, [editingCategoryId]);
   
-  // Setup mouse move/up handlers for dragging
+  // Setup mouse event handlers
   useEffect(() => {
     const handleGlobalMouseMove = (e) => {
-      if (isDragging) {
-        handleMouseMove(e);
-      }
+      handleMouseMove(e);
     };
     
-    const handleGlobalMouseUp = () => {
-      if (isDragging) {
-        handleMouseUp();
-      }
+    const handleGlobalMouseUp = (e) => {
+      handleMouseUp();
+    };
+
+    // Handle mouse leave to ensure we clean up any dragging state
+    const handleMouseLeave = () => {
+      setIsDragging(false);
+      setIsPanning(false);
     };
     
     window.addEventListener('mousemove', handleGlobalMouseMove);
     window.addEventListener('mouseup', handleGlobalMouseUp);
+    window.addEventListener('mouseleave', handleMouseLeave);
     
     return () => {
       window.removeEventListener('mousemove', handleGlobalMouseMove);
       window.removeEventListener('mouseup', handleGlobalMouseUp);
+      window.removeEventListener('mouseleave', handleMouseLeave);
     };
-  }, [isDragging]);
+  }, [isDragging, isAltPressed, markers]);
+  
+  // Prevent losing Alt key state when window loses focus
+  useEffect(() => {
+    const handleBlur = () => {
+      setIsAltPressed(false);
+      setIsPanning(false);
+      setIsDragging(false);
+      setMarkerToDelete(null);
+    };
+    
+    window.addEventListener('blur', handleBlur);
+    
+    return () => {
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, []);
   
   // --- RENDERING ---
   // Count markers by category
@@ -682,15 +788,44 @@ const exportImage = () => {
     return markers.filter(m => m.categoryId === categoryId).length;
   };
   
+  // Get active category color
+  const getActiveCategoryColor = () => {
+    const category = categories.find(c => c.id === activeCategory);
+    return category ? category.color : '#FF5252';
+  };
+  
+  // Open color editor for a specific category
+  const openColorEditor = (categoryId) => {
+    const category = categories.find(c => c.id === categoryId);
+    if (category) {
+      setEditingCategoryId(categoryId);
+      setNewCategoryColor(category.color);
+      setShowColorPicker(true);
+    }
+  };
+  
+  // Update category color
+  const updateCategoryColor = (categoryId, newColor) => {
+    setCategories(
+      categories.map(category => 
+        category.id === categoryId
+          ? { ...category, color: newColor }
+          : category
+      )
+    );
+    setShowColorPicker(false);
+    setEditingCategoryId(null);
+  };
+  
   return (
-    <div className="h-screen w-screen flex flex-col bg-gray-100">
+    <div className="h-screen w-screen flex flex-col bg-gray-900">
       {/* Header */}
-      <header className="bg-white shadow-sm z-10">
+      <header className="bg-gray-800 shadow-md z-10">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center">
-            <h1 className="text-xl font-semibold text-gray-800">MapMarker Pro</h1>
+            <h1 className="text-xl font-semibold text-white">MapMarker Pro</h1>
             {image && (
-              <span className="text-sm text-gray-500 ml-4">
+              <span className="text-sm text-gray-400 ml-4">
                 {markers.length} {markers.length === 1 ? 'marker' : 'markers'}
               </span>
             )}
@@ -699,10 +834,10 @@ const exportImage = () => {
           <div className="flex items-center space-x-3">
             {image && (
               <>
-                <div className="flex items-center space-x-1 text-sm px-2 py-1 bg-gray-100 rounded">
+                <div className="flex items-center space-x-1 text-sm px-2 py-1 bg-gray-700 rounded">
                   <button
                     onClick={() => setViewportTransform({...viewportTransform, scale: viewportTransform.scale * 1.2})}
-                    className="px-2 py-1 text-gray-600 hover:text-gray-900"
+                    className="px-2 py-1 text-gray-300 hover:text-white"
                     title="Zoom In"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -710,13 +845,13 @@ const exportImage = () => {
                     </svg>
                   </button>
                   
-                  <span className="text-gray-700 w-12 text-center">
+                  <span className="text-gray-300 w-12 text-center">
                     {Math.round(viewportTransform.scale * 100)}%
                   </span>
                   
                   <button
                     onClick={() => setViewportTransform({...viewportTransform, scale: viewportTransform.scale / 1.2})}
-                    className="px-2 py-1 text-gray-600 hover:text-gray-900"
+                    className="px-2 py-1 text-gray-300 hover:text-white"
                     title="Zoom Out"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -726,7 +861,7 @@ const exportImage = () => {
                   
                   <button
                     onClick={resetView}
-                    className="px-2 py-1 text-gray-600 hover:text-gray-900"
+                    className="px-2 py-1 text-gray-300 hover:text-white"
                     title="Reset View (R)"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -737,7 +872,7 @@ const exportImage = () => {
                 
                 <button
                   onClick={() => setShowSidebar(!showSidebar)}
-                  className="p-2 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+                  className="p-2 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-700"
                   title="Toggle Sidebar (C)"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -749,7 +884,7 @@ const exportImage = () => {
             
             <button
               onClick={() => setShowHelp(true)}
-              className="p-2 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+              className="p-2 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-700"
               title="Help (H)"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -764,9 +899,9 @@ const exportImage = () => {
       <main className="flex-1 flex overflow-hidden">
         {/* Sidebar */}
         {image && showSidebar && (
-          <div className="w-72 bg-white shadow-md z-10 flex flex-col h-full">
-            <div className="p-4 border-b">
-              <h2 className="font-medium text-gray-700">Categories</h2>
+          <div className="w-72 bg-gray-800 shadow-md z-10 flex flex-col h-full">
+            <div className="p-4 border-b border-gray-700">
+              <h2 className="font-medium text-gray-200">Categories</h2>
             </div>
             
             <div className="p-4 flex-1 overflow-y-auto">
@@ -775,7 +910,7 @@ const exportImage = () => {
                   <div 
                     key={category.id} 
                     className={`flex items-center p-2 rounded ${
-                      activeCategory === category.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                      activeCategory === category.id ? 'bg-gray-700' : 'hover:bg-gray-700'
                     }`}
                   >
                     <button
@@ -793,7 +928,7 @@ const exportImage = () => {
                     </button>
                     
                     <div className="flex-1 min-w-0">
-                      {editingCategoryId === category.id ? (
+                      {editingCategoryId === category.id && !showColorPicker ? (
                         <input
                           ref={editInputRef}
                           type="text"
@@ -804,22 +939,31 @@ const exportImage = () => {
                             if (e.key === 'Enter') saveEditedCategory();
                             if (e.key === 'Escape') setEditingCategoryId(null);
                           }}
-                          className="w-full px-2 py-1 text-sm border rounded"
+                          className="w-full px-2 py-1 text-sm border rounded bg-gray-700 text-white border-gray-600"
                         />
                       ) : (
-                        <div 
-                          className="truncate text-sm font-medium cursor-pointer hover:text-blue-600"
-                          onClick={() => startEditingCategory(category)}
-                          title="Click to rename"
-                        >
-                          {category.name}
+                        <div className="flex flex-col">
+                          <div 
+                            className="truncate text-sm font-medium cursor-pointer text-gray-200 hover:text-blue-400"
+                            onClick={() => startEditingCategory(category)}
+                            title="Click to rename"
+                          >
+                            {category.name}
+                          </div>
+                          <div
+                            className="text-xs text-gray-400 cursor-pointer hover:text-blue-400"
+                            onClick={() => openColorEditor(category.id)}
+                            title="Change color"
+                          >
+                            Change color
+                          </div>
                         </div>
                       )}
                     </div>
                     
                     <button
                       onClick={() => deleteCategory(category.id)}
-                      className="p-1 text-gray-400 hover:text-red-500"
+                      className="p-1 text-gray-400 hover:text-red-400"
                       title="Delete category"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -829,57 +973,61 @@ const exportImage = () => {
                   </div>
                 ))}
                 
+                {/* Edit Color Dialog */}
+                {showColorPicker && editingCategoryId && (
+                  <div className="bg-gray-700 p-3 rounded-lg mt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm text-gray-300">Edit Color:</span>
+                      <button 
+                        onClick={() => {
+                          setShowColorPicker(false);
+                          setEditingCategoryId(null);
+                        }}
+                        className="text-gray-400 hover:text-gray-200"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                      </button>
+                    </div>
+                    
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="color"
+                        value={newCategoryColor}
+                        onChange={(e) => setNewCategoryColor(e.target.value)}
+                        className="w-8 h-8 p-0 border-0 rounded overflow-hidden cursor-pointer"
+                      />
+                      <button
+                        onClick={() => updateCategoryColor(editingCategoryId, newCategoryColor)}
+                        className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                      >
+                        Update Color
+                      </button>
+                    </div>
+                  </div>
+                )}
+                
                 {/* Add new category */}
                 {categories.length < 10 && (
                   <div className="mt-4">
-                    {showColorPicker ? (
-                      <div className="bg-gray-50 p-3 rounded-lg">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm text-gray-600">Choose Color:</span>
-                          <button 
-                            onClick={() => setShowColorPicker(false)}
-                            className="text-gray-400 hover:text-gray-600"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                            </svg>
-                          </button>
-                        </div>
-                        
-                        <div className="flex items-center space-x-2">
-                          <input
-                            type="color"
-                            value={newCategoryColor}
-                            onChange={(e) => setNewCategoryColor(e.target.value)}
-                            className="w-8 h-8 p-0 border-0 rounded overflow-hidden cursor-pointer"
-                          />
-                          <button
-                            onClick={addNewCategory}
-                            className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
-                          >
-                            Add Category
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setShowColorPicker(true)}
-                        className="w-full py-2 px-3 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded flex items-center justify-center text-sm"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
-                        </svg>
-                        Add New Category
-                      </button>
-                    )}
+                    <button
+                      onClick={addNewCategory}
+                      className="w-full py-2 px-3 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded flex items-center justify-center text-sm"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                      </svg>
+                      Add New Category
+                    </button>
                   </div>
                 )}
               </div>
               
               {/* Summary section */}
               {markers.length > 0 && (
-                <div className="mt-6 pt-4 border-t">
-                  <h3 className="font-medium text-gray-700 mb-2">Summary</h3>
+                <div className="mt-6 pt-4 border-t border-gray-700">
+                  <h3 className="font-medium text-gray-300 mb-2">Summary</h3>
                   <div className="space-y-1">
                     {categories.map(category => {
                       const count = getCategoryCount(category.id);
@@ -892,16 +1040,16 @@ const exportImage = () => {
                               className="w-3 h-3 rounded-full mr-2" 
                               style={{ backgroundColor: category.color }}
                             />
-                            <span className="truncate">{category.name}</span>
+                            <span className="truncate text-gray-300">{category.name}</span>
                           </div>
-                          <span className="font-medium">{count}</span>
+                          <span className="font-medium text-gray-300">{count}</span>
                         </div>
                       );
                     })}
                     
-                    <div className="flex items-center justify-between text-sm font-bold mt-2 pt-2 border-t">
-                      <span>Total</span>
-                      <span>{markers.length}</span>
+                    <div className="flex items-center justify-between text-sm font-bold mt-2 pt-2 border-t border-gray-700">
+                      <span className="text-gray-300">Total</span>
+                      <span className="text-gray-300">{markers.length}</span>
                     </div>
                   </div>
                 </div>
@@ -909,15 +1057,15 @@ const exportImage = () => {
             </div>
             
             {/* Action buttons */}
-            <div className="p-4 border-t">
+            <div className="p-4 border-t border-gray-700">
               <div className="space-y-2">
                 <button
                   onClick={exportImage}
                   disabled={!image || markers.length === 0 || isExporting}
                   className={`w-full py-2 px-4 rounded flex items-center justify-center ${
                     !image || markers.length === 0 || isExporting
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                      : 'bg-blue-500 text-white hover:bg-blue-600'
+                      ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
                   }`}
                 >
                   {isExporting ? (
@@ -937,8 +1085,8 @@ const exportImage = () => {
                   disabled={!image || markers.length === 0}
                   className={`w-full py-2 px-4 rounded ${
                     !image || markers.length === 0
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                      : 'bg-red-500 text-white hover:bg-red-600'
+                      ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                      : 'bg-red-600 text-white hover:bg-red-700'
                   }`}
                 >
                   Clear All Markers
@@ -946,7 +1094,7 @@ const exportImage = () => {
                 
                 <button
                   onClick={triggerFileUpload}
-                  className="w-full py-2 px-4 bg-gray-200 text-gray-700 hover:bg-gray-300 rounded"
+                  className="w-full py-2 px-4 bg-gray-700 text-gray-200 hover:bg-gray-600 rounded"
                 >
                   {image ? 'Change Image' : 'Upload Image'}
                 </button>
@@ -962,16 +1110,17 @@ const exportImage = () => {
         >
           {image ? (
             <div 
+              ref={mapAreaRef}
               className="relative"
               onMouseDown={handleMouseDown}
               onClick={(e) => {
-                if (e.button === 0 && !e.altKey) {
+                if (e.button === 0) {
                   handleCanvasClick(e);
                 }
               }}
               onWheel={handleWheel}
               style={{
-                cursor: isDragging ? 'grabbing' : 'crosshair',
+                cursor: 'none', // Hide the default cursor
                 width: '100%',
                 height: '100%',
                 overflow: 'hidden'
@@ -979,6 +1128,7 @@ const exportImage = () => {
             >
               {/* Main image */}
               <img
+                ref={imageRef}
                 src={image.src}
                 alt="Map"
                 style={{
@@ -1011,6 +1161,9 @@ const exportImage = () => {
                 
                 const markerIndex = categoryMarkers.findIndex(m => m.id === marker.id);
                 
+                // Check if this marker is being hovered for deletion
+                const isTargetedForDeletion = markerToDelete && markerToDelete.id === marker.id;
+                
                 return (
                   <div
                     key={marker.id}
@@ -1018,11 +1171,27 @@ const exportImage = () => {
                     style={{
                       top: screenPos.y + 'px',
                       left: screenPos.x + 'px',
+                      zIndex: isTargetedForDeletion ? 10 : 1, // Bring to front when targeted
                     }}
                   >
+                    {/* Highlight effect for marker targeted for deletion */}
+                    {isTargetedForDeletion && (
+                      <div
+                        className="absolute rounded-full animate-pulse"
+                        style={{
+                          width: (markerSize * 2) + 8 + 'px',
+                          height: (markerSize * 2) + 8 + 'px',
+                          backgroundColor: 'rgba(239, 68, 68, 0.3)',
+                          border: '2px solid rgba(239, 68, 68, 0.7)',
+                          top: '-4px',
+                          left: '-4px',
+                        }}
+                      ></div>
+                    )}
+                    
                     {/* Marker circle */}
                     <div
-                      className="rounded-full flex items-center justify-center"
+                      className={`rounded-full flex items-center justify-center ${isTargetedForDeletion ? 'ring-2 ring-red-500' : ''}`}
                       style={{
                         width: markerSize * 2 + 'px',
                         height: markerSize * 2 + 'px',
@@ -1040,13 +1209,82 @@ const exportImage = () => {
                 );
               })}
               
+              {/* Custom cursor */}
+              <div
+                className="fixed pointer-events-none z-50 custom-cursor"
+                style={{
+                  top: mousePosition.y,
+                  left: mousePosition.x,
+                  transform: 'translate(-50%, -50%)'
+                }}
+              >
+                {isAltPressed ? (
+                  /* Delete mode cursor */
+                  <div className="flex flex-col items-center delete-cursor">
+                    <div
+                      className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
+                      style={{ backgroundColor: 'rgba(239, 68, 68, 0.7)' }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                    <div className="text-white bg-red-600 text-xs px-1 rounded mt-1 opacity-80">
+                      Delete Mode
+                    </div>
+                  </div>
+                ) : isPanning ? (
+                  /* Panning mode cursor */
+                  <div className="flex flex-col items-center">
+                    <div
+                      className="rounded-full w-6 h-6 border-2 border-white flex items-center justify-center"
+                      style={{ backgroundColor: 'rgba(59, 130, 246, 0.7)' }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 2a2 2 0 012 2v2h2a2 2 0 012 2v2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2v-2h2V8h-4V6h2V4h-4v4h2v2H8v4H6v-2H4v2H2v-2a2 2 0 012-2h2V6a2 2 0 012-2h2V2z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                    <div className="text-white bg-blue-600 text-xs px-1 rounded mt-1 opacity-80">
+                      Panning
+                    </div>
+                  </div>
+                ) : (
+                  /* Regular cursor (category dot) */
+                  <div
+                    className="rounded-full w-6 h-6 border-2 border-white"
+                    style={{ 
+                      backgroundColor: getColorWithAlpha(getActiveCategoryColor(), 0.7),
+                      boxShadow: '0 0 5px rgba(0,0,0,0.3)'
+                    }}
+                  ></div>
+                )}
+              </div>
+              
               {/* Instructions overlay */}
               {markers.length === 0 && image && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none instructions-overlay">
                   <div className="bg-black bg-opacity-70 text-white p-4 rounded-lg max-w-md text-center">
                     <p>Click anywhere to add markers</p>
+                    <p className="text-sm text-gray-300 mt-1">Hold Alt to remove markers</p>
+                    <p className="text-sm text-gray-300 mt-1">Middle-click to pan the image</p>
                     <p className="text-sm text-gray-300 mt-1">Press H for help and keyboard shortcuts</p>
                   </div>
+                </div>
+              )}
+              
+              {/* Mode indicator */}
+              {image && (isAltPressed || isPanning) && (
+                <div className="fixed top-4 right-4 z-40 pointer-events-none mode-indicator">
+                  {isAltPressed && (
+                    <div className="bg-red-600 text-white px-3 py-1 rounded shadow-lg animate-pulse">
+                      Delete Mode
+                    </div>
+                  )}
+                  {isPanning && (
+                    <div className="bg-blue-600 text-white px-3 py-1 rounded shadow-lg animate-pulse">
+                      Panning Mode
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1069,7 +1307,7 @@ const exportImage = () => {
               
               <button
                 onClick={triggerFileUpload}
-                className="px-6 py-3 bg-blue-500 text-white rounded-lg shadow-sm hover:bg-blue-600 transition-colors"
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg shadow-sm hover:bg-blue-700 transition-colors"
               >
                 Select Image
               </button>
@@ -1081,12 +1319,12 @@ const exportImage = () => {
       {/* Help dialog */}
       {showHelp && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[80vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-gray-800">MapMarker Pro Help</h3>
+              <h3 className="text-xl font-bold text-white">MapMarker Pro Help</h3>
               <button 
                 onClick={() => setShowHelp(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl"
+                className="text-gray-400 hover:text-gray-200 text-xl"
               >
                 ×
               </button>
@@ -1094,57 +1332,71 @@ const exportImage = () => {
             
             <div className="space-y-5">
               <section>
-                <h4 className="font-medium text-gray-700 mb-2">Markers</h4>
-                <ul className="space-y-1 text-gray-600">
-                  <li><span className="font-medium">Add marker:</span> Click anywhere on the image</li>
-                  <li><span className="font-medium">Remove marker:</span> Click on an existing marker</li>
-                  <li><span className="font-medium">Change marker type:</span> Select a different category from the sidebar before clicking</li>
+                <h4 className="font-medium text-gray-300 mb-2">Markers</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Add marker:</span> Click anywhere on the image</li>
+                  <li><span className="font-medium text-gray-300">Remove marker:</span> Hold Alt and click on a marker</li>
+                  <li><span className="font-medium text-gray-300">Change marker type:</span> Select a different category from the sidebar before clicking</li>
                 </ul>
               </section>
               
               <section>
-                <h4 className="font-medium text-gray-700 mb-2">Navigation</h4>
-                <ul className="space-y-1 text-gray-600">
-                  <li><span className="font-medium">Zoom in/out:</span> Use mouse wheel or the zoom controls</li>
-                  <li><span className="font-medium">Pan around:</span> Hold Alt and drag, or use middle mouse button</li>
-                  <li><span className="font-medium">Reset view:</span> Click 100% button or press R</li>
+                <h4 className="font-medium text-gray-300 mb-2">Navigation</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Zoom in/out:</span> Use mouse wheel or the zoom controls</li>
+                  <li><span className="font-medium text-gray-300">Pan image:</span> Use middle mouse button</li>
+                  <li><span className="font-medium text-gray-300">Reset view:</span> Click 100% button or press R</li>
                 </ul>
               </section>
               
               <section>
-                <h4 className="font-medium text-gray-700 mb-2">Categories</h4>
-                <ul className="space-y-1 text-gray-600">
-                  <li><span className="font-medium">Select category:</span> Click on a category in the sidebar or press 1-9</li>
-                  <li><span className="font-medium">Rename category:</span> Click on the category name</li>
-                  <li><span className="font-medium">Add category:</span> Click "Add New Category" and choose a color</li>
-                  <li><span className="font-medium">Delete category:</span> Click the trash icon next to a category</li>
+                <h4 className="font-medium text-gray-300 mb-2">Visual Indicators</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Cursor dot:</span> Shows the currently selected category color</li>
+                  <li><span className="font-medium text-gray-300">Delete mode:</span> Red cursor with X icon when Alt is held</li>
+                  <li><span className="font-medium text-gray-300">Deletion target:</span> Markers targeted for deletion will highlight with a red pulsing border</li>
+                  <li><span className="font-medium text-gray-300">Panning mode:</span> Blue cursor with move icon when panning</li>
                 </ul>
               </section>
               
               <section>
-                <h4 className="font-medium text-gray-700 mb-2">Keyboard Shortcuts</h4>
-                <ul className="space-y-1 text-gray-600 text-sm">
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">1-9</kbd> Select category</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">H</kbd> Show/hide help</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">C</kbd> Toggle sidebar</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">R</kbd> Reset view</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">Ctrl+S</kbd> Export image</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">Ctrl+V</kbd> Paste image</li>
-                  <li><kbd className="bg-gray-100 px-2 py-1 rounded">Esc</kbd> Close dialogs</li>
+                <h4 className="font-medium text-gray-300 mb-2">Categories</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Select category:</span> Click on a category in the sidebar or press 1-9</li>
+                  <li><span className="font-medium text-gray-300">Rename category:</span> Click on the category name</li>
+                  <li><span className="font-medium text-gray-300">Change color:</span> Click "Change color" link under the category</li>
+                  <li><span className="font-medium text-gray-300">Add category:</span> Click "Add New Category" button</li>
+                  <li><span className="font-medium text-gray-300">Delete category:</span> Click the trash icon next to a category</li>
                 </ul>
               </section>
               
               <section>
-                <h4 className="font-medium text-gray-700 mb-2">Export</h4>
-                <p className="text-gray-600">
-                  Click "Export Image" to save your marked map as a PNG file with a legend showing the marker categories and counts.
-                </p>
+                <h4 className="font-medium text-gray-300 mb-2">Export</h4>
+                <ul className="space-y-1 text-gray-400">
+                  <li><span className="font-medium text-gray-300">Export image:</span> Captures the current view exactly as you see it</li>
+                  <li><span className="font-medium text-gray-300">Export format:</span> PNG file with legend showing category counts</li>
+                  <li><span className="font-medium text-gray-300">Shortcut:</span> Ctrl+S (or Cmd+S on Mac)</li>
+                </ul>
+              </section>
+              
+              <section>
+                <h4 className="font-medium text-gray-300 mb-2">Keyboard Shortcuts</h4>
+                <ul className="space-y-1 text-gray-400 text-sm">
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">1-9</kbd> Select category</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">H</kbd> Show/hide help</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">C</kbd> Toggle sidebar</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">R</kbd> Reset view</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">Alt</kbd> Hold for delete mode</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">Ctrl+S</kbd> Export image</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">Ctrl+V</kbd> Paste image</li>
+                  <li><kbd className="bg-gray-700 px-2 py-1 rounded">Esc</kbd> Close dialogs</li>
+                </ul>
               </section>
             </div>
             
             <button
               onClick={() => setShowHelp(false)}
-              className="mt-6 w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+              className="mt-6 w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
             >
               Got it!
             </button>
@@ -1156,10 +1408,10 @@ const exportImage = () => {
       {notification && (
         <div className="fixed bottom-4 right-4 z-50">
           <div className={`px-4 py-3 rounded-lg shadow-lg ${
-            notification.type === 'error' ? 'bg-red-500 text-white' :
-            notification.type === 'success' ? 'bg-green-500 text-white' :
-            notification.type === 'warning' ? 'bg-yellow-500 text-white' :
-            'bg-blue-500 text-white'
+            notification.type === 'error' ? 'bg-red-600 text-white' :
+            notification.type === 'success' ? 'bg-green-600 text-white' :
+            notification.type === 'warning' ? 'bg-yellow-600 text-white' :
+            'bg-blue-600 text-white'
           }`}>
             {notification.message}
           </div>
