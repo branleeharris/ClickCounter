@@ -850,7 +850,7 @@ function App() {
       <header className="bg-gray-800 shadow-md z-10">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center">
-            <h1 className="text-xl font-semibold text-white">MapMarker Pro</h1>
+            <h1 className="text-xl font-semibold text-white">Just Click It</h1>
             {image && (
               <span className="text-sm text-gray-400 ml-4">
                 {markers.length} {markers.length === 1 ? 'marker' : 'markers'}
@@ -1352,7 +1352,7 @@ function App() {
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-white">MapMarker Pro Help</h3>
+              <h3 className="text-xl font-bold text-white">Just Click It Help</h3>
               <button 
                 onClick={() => setShowHelp(false)}
                 className="text-gray-400 hover:text-gray-200 text-xl"
